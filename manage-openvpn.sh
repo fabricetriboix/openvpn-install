@@ -20,7 +20,7 @@ DNS=google
 FIREWALL=no
 CLIENT=
 
-ARGS=$(getopt -o hiua:r:tp:I:P:d:f -- "$@")
+ARGS=$(getopt -o hiua:rtp:I:P:d:f -- "$@")
 eval set -- "$ARGS"
 set +u  # Avoid unbound $1 at the end of the parsing
 while true; do
@@ -29,7 +29,7 @@ while true; do
         -i) OPERATION=install; shift;;
         -u) OPERATION=uninstall; shift;;
         -a) OPERATION=adduser; CLIENT="$2"; shift; shift;;
-        -r) OPERATION=rmuser; CLIENT="$2"; shift; shift;;
+        -r) OPERATION=rmuser; shift;;
         -t) PROTOCOL=tcp; shift;;
         -p) PORT="$2"; shift; shift;;
         -I) IP="$2"; shift; shift;;
@@ -59,7 +59,7 @@ if [[ $HELP == yes ]]; then
     echo "  -i       Install and configure an OpenVPN server"
     echo "  -u       Uninstall OpenVPN"
     echo "  -a USER  Add a user"
-    echo "  -r USER  Remove a user"
+    echo "  -r       Remove a user"
     echo
     echo "The following arguments are only available in conjuction with -i:"
     echo "  -t         Use TCP instead of UDP"
@@ -143,7 +143,7 @@ log "Detected OS: $OS"
 
 newclient () {
     # Generates the custom client.ovpn
-    file="$HOME/$1.ovpn"
+    file="/etc/openvpn/$1.ovpn"
     cp /etc/openvpn/client-common.txt "$file"
     echo "<ca>" >> "$file"
     cat /etc/openvpn/easy-rsa/pki/ca.crt >> "$file"
@@ -444,7 +444,7 @@ if [[ $OPERATION == adduser ]]; then
     EASYRSA_CERT_EXPIRE=3650 ./easyrsa build-client-full "$CLIENT"
     newclient "$CLIENT"
     echo "User $CLIENT added"
-    echo "Configuration is available at: $HOME/$CLIENT.ovpn"
+    echo "Configuration is available at: /etc/openvpn/$CLIENT.ovpn"
     exit 0
 fi
 
