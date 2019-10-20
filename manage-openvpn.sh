@@ -184,16 +184,6 @@ if [[ $OPERATION == refresh ]]; then
         fi
     fi
 
-    # Get easy-rsa
-    EASYRSAURL='https://github.com/OpenVPN/easy-rsa/releases/download/v3.0.6/EasyRSA-unix-v3.0.6.tgz'
-    wget -O ~/easyrsa.tgz "$EASYRSAURL" 2>/dev/null \
-        || curl -Lo ~/easyrsa.tgz "$EASYRSAURL"
-    tar xzf ~/easyrsa.tgz -C ~/
-    mv ~/EasyRSA-v3.0.6/ /etc/openvpn/
-    mv /etc/openvpn/EasyRSA-v3.0.6/ /etc/openvpn/easy-rsa/
-    chown -R root:root /etc/openvpn/easy-rsa/
-    rm -f ~/easyrsa.tgz
-
     # Enable net.ipv4.ip_forward for the system
     echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/30-openvpn-forward.conf
 
