@@ -84,7 +84,7 @@ if [[ $OPERATION == none ]]; then
     exit 1
 fi
 
-if [[ $OPERATION == adduser || $OPERATION == rmuser ]]; then
+if [[ $OPERATION == adduser ]]; then
     if [[ -z $CLIENT ]]; then
         echo "ERROR: User name is empty"
         exit 1
