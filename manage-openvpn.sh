@@ -20,7 +20,7 @@ DNS=google
 FIREWALL=no
 CLIENT=
 
-ARGS=$(getopt -o hiua:rtp:I:P:d:f -- "$@")
+ARGS=$(getopt -o hiuRa:rtp:I:P:d:f -- "$@")
 eval set -- "$ARGS"
 set +u  # Avoid unbound $1 at the end of the parsing
 while true; do
@@ -28,6 +28,7 @@ while true; do
         -h) HELP=yes; shift;;
         -i) OPERATION=install; shift;;
         -u) OPERATION=uninstall; shift;;
+        -R) OPERATION=refresh; shift;;
         -a) OPERATION=adduser; CLIENT="$2"; shift; shift;;
         -r) OPERATION=rmuser; shift;;
         -t) PROTOCOL=tcp; shift;;
@@ -50,7 +51,7 @@ if [[ $HELP == yes ]]; then
     echo
     echo "Please note this script must be run as root."
     echo
-    echo "You must specify one of -i, -u, -a or -r argument. For all the"
+    echo "You must specify one of -i, -u, -R, -a or -r argument. For all the"
     echo "other arguments, it is advised you leave them at their default"
     echo "values, unless you really know what you are doing."
     echo
@@ -58,6 +59,8 @@ if [[ $HELP == yes ]]; then
     echo "  -h       Print this help message"
     echo "  -i       Install and configure an OpenVPN server"
     echo "  -u       Uninstall OpenVPN"
+    echo "  -R       Refresh OpenVPN (re-install the OS packages, but leave"
+    echo "           the existing OpenVPN data untouched"
     echo "  -a USER  Add a user"
     echo "  -r       Remove a user"
     echo
@@ -159,6 +162,117 @@ newclient () {
     sed -ne '/BEGIN OpenVPN Static key/,$ p' /etc/openvpn/ta.key >> "$file"
     echo "</tls-auth>" >> "$file"
 }
+
+
+###################
+# Refresh OpenVPN #
+###################
+
+if [[ $OPERATION == refresh ]]; then
+    if [[ $OS == debian ]]; then
+        apt-get -q -y update
+        apt-get -q -y install openvpn openssl ca-certificates
+        if [[ $FIREWALL == yes ]]; then
+            apt-get -q -y iptables
+        fi
+
+    else
+        yum -q -y install epel-release
+        yum -q -y install openvpn openssl ca-certificates
+        if [[ $FIREWALL == yes ]]; then
+            yum -q -y install iptables
+        fi
+    fi
+
+    # Get easy-rsa
+    EASYRSAURL='https://github.com/OpenVPN/easy-rsa/releases/download/v3.0.6/EasyRSA-unix-v3.0.6.tgz'
+    wget -O ~/easyrsa.tgz "$EASYRSAURL" 2>/dev/null \
+        || curl -Lo ~/easyrsa.tgz "$EASYRSAURL"
+    tar xzf ~/easyrsa.tgz -C ~/
+    mv ~/EasyRSA-v3.0.6/ /etc/openvpn/
+    mv /etc/openvpn/EasyRSA-v3.0.6/ /etc/openvpn/easy-rsa/
+    chown -R root:root /etc/openvpn/easy-rsa/
+    rm -f ~/easyrsa.tgz
+
+    # Enable net.ipv4.ip_forward for the system
+    echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/30-openvpn-forward.conf
+
+    # Enable without waiting for a reboot or service restart
+    echo 1 > /proc/sys/net/ipv4/ip_forward
+
+    if [[ $FIREWALL == yes ]]; then
+        if pgrep firewalld; then
+            # Using both permanent and not permanent rules to avoid a firewalld
+            # reload.
+            # We don't use --add-service=openvpn because that would only work with
+            # the default port and protocol.
+            firewall-cmd --zone=public --add-port=$PORT/$PROTOCOL
+            firewall-cmd --zone=trusted --add-source=10.8.0.0/24
+            firewall-cmd --permanent --zone=public --add-port=$PORT/$PROTOCOL
+            firewall-cmd --permanent --zone=trusted --add-source=10.8.0.0/24
+            # Set NAT for the VPN subnet
+            firewall-cmd --direct --add-rule ipv4 nat POSTROUTING 0 -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j SNAT --to $IP
+            firewall-cmd --permanent --direct --add-rule ipv4 nat POSTROUTING 0 -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j SNAT --to $IP
+
+        else
+            # Needed to use rc.local with some systemd distros
+            if [[ "$OS" = 'debian' && ! -e $RCLOCAL ]]; then
+                echo '#!/bin/sh -e
+    exit 0' > $RCLOCAL
+            fi
+            chmod +x $RCLOCAL
+
+            # Set NAT for the VPN subnet
+            iptables -t nat -A POSTROUTING -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j SNAT --to $IP
+            sed -i "1 a\iptables -t nat -A POSTROUTING -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j SNAT --to $IP" $RCLOCAL
+
+            if iptables -L -n | grep -qE '^(REJECT|DROP)'; then
+                # If iptables has at least one REJECT rule, we asume this is
+                # needed. Not the best approach but I can't think of other
+                # and this shouldn't cause problems.
+                iptables -I INPUT -p $PROTOCOL --dport $PORT -j ACCEPT
+                iptables -I FORWARD -s 10.8.0.0/24 -j ACCEPT
+                iptables -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
+                sed -i "1 a\iptables -I INPUT -p $PROTOCOL --dport $PORT -j ACCEPT" $RCLOCAL
+                sed -i "1 a\iptables -I FORWARD -s 10.8.0.0/24 -j ACCEPT" $RCLOCAL
+                sed -i "1 a\iptables -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT" $RCLOCAL
+            fi
+        fi
+    else
+        log "Not touching the firewall"
+    fi
+    echo $FIREWALL > /etc/openvpn/configure-firewall
+
+    # If SELinux is enabled and a custom port was selected, we need this
+    if sestatus 2>/dev/null | grep "Current mode" | grep -q "enforcing" && [[ "$PORT" != '1194' ]]; then
+        # Install semanage if not already present
+        if ! hash semanage 2>/dev/null; then
+            yum install policycoreutils-python -y
+        fi
+        semanage port -a -t openvpn_port_t -p $PROTOCOL $PORT
+    fi
+
+    # And finally, restart OpenVPN
+    if [[ "$OS" = 'debian' ]]; then
+        # Little hack to check for systemd
+        if pgrep systemd-journal; then
+            systemctl restart openvpn@server.service
+        else
+            /etc/init.d/openvpn restart
+        fi
+    else
+        if pgrep systemd-journal; then
+            systemctl restart openvpn@server.service
+            systemctl enable openvpn@server.service
+        else
+            service openvpn restart
+            chkconfig openvpn on
+        fi
+    fi
+
+    log "OpenVPN successfully refreshed"
+    exit 0
+fi
 
 
 #################################
