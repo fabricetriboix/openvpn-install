@@ -16,12 +16,12 @@ PROTOCOL=udp
 PORT=1194
 IP=$(ip addr | grep 'inet' | grep -v inet6 | grep -vE '127\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' | grep -oE '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' | head -1)
 # NB: Try different services to get the public IP address, because some may be down
-PUBLICIP=$(curl -sf -m 10 ifconfig.co || curl -sf -m 10 ifconfig.me)
+PUBLICIP=$(curl -sf -m 3 ifconfig.co || curl -sf -m 3 ifconfig.me)
 DNS=google
 FIREWALL=no
 CLIENT=
 
-ARGS=$(getopt -o hiuRa:rtp:I:P:d:f -- "$@")
+ARGS=$(getopt -o hiuRa:r:tp:I:P:d:f -- "$@")
 eval set -- "$ARGS"
 set +u  # Avoid unbound $1 at the end of the parsing
 while true; do
@@ -31,7 +31,7 @@ while true; do
         -u) OPERATION=uninstall; shift;;
         -R) OPERATION=refresh; shift;;
         -a) OPERATION=adduser; CLIENT="$2"; shift; shift;;
-        -r) OPERATION=rmuser; shift;;
+        -r) OPERATION=rmuser; CLIENT="$2"; shift; shift;;
         -t) PROTOCOL=tcp; shift;;
         -p) PORT="$2"; shift; shift;;
         -I) IP="$2"; shift; shift;;
@@ -559,39 +559,23 @@ fi
 #################
 
 if [[ $OPERATION == rmuser ]]; then
-    # This option could be documented a bit better and maybe even be simplified
-    # ...but what can I say, I want some sleep too
-    NUMBEROFCLIENTS=$(tail -n +2 /etc/openvpn/easy-rsa/pki/index.txt | grep -c "^V")
-    if [[ $NUMBEROFCLIENTS == 0 ]]; then
-        echo "You have no existing clients!"
-        exit 0
+    if grep -sI "^R.*CN=$CLIENT" /etc/openvpn/easy-rsa/pki/index.txt > /dev/null; then
+        echo "User already removed: $CLIENT"
+        exit 1
     fi
-    # TODO
+    if ! grep -sI "^V.*CN=$CLIENT" /etc/openvpn/easy-rsa/pki/index.txt > /dev/null; then
+        echo "User does not exist: $CLIENT"
+        exit 1
+    fi
+    cd /etc/openvpn/easy-rsa/
+    ./easyrsa --batch revoke $CLIENT
+    EASYRSA_CRL_DAYS=3650 ./easyrsa gen-crl
+    rm -f /etc/openvpn/crl.pem
+    cp /etc/openvpn/easy-rsa/pki/crl.pem /etc/openvpn/crl.pem
+    # CRL is read with each client connection, when OpenVPN is dropped to nobody
+    chown nobody:$GROUPNAME /etc/openvpn/crl.pem
     echo
-    echo "Select the existing client certificate you want to revoke:"
-    tail -n +2 /etc/openvpn/easy-rsa/pki/index.txt | grep "^V" | cut -d '=' -f 2 | nl -s ') '
-    if [[ "$NUMBEROFCLIENTS" = '1' ]]; then
-        read -p "Select one client [1]: " CLIENTNUMBER
-    else
-        read -p "Select one client [1-$NUMBEROFCLIENTS]: " CLIENTNUMBER
-    fi
-    CLIENT=$(tail -n +2 /etc/openvpn/easy-rsa/pki/index.txt | grep "^V" | cut -d '=' -f 2 | sed -n "$CLIENTNUMBER"p)
-    echo
-    read -p "Do you really want to revoke access for client $CLIENT? [y/N]: " -e REVOKE
-    if [[ "$REVOKE" = 'y' || "$REVOKE" = 'Y' ]]; then
-        cd /etc/openvpn/easy-rsa/
-        ./easyrsa --batch revoke $CLIENT
-        EASYRSA_CRL_DAYS=3650 ./easyrsa gen-crl
-        rm -f /etc/openvpn/crl.pem
-        cp /etc/openvpn/easy-rsa/pki/crl.pem /etc/openvpn/crl.pem
-        # CRL is read with each client connection, when OpenVPN is dropped to nobody
-        chown nobody:$GROUPNAME /etc/openvpn/crl.pem
-        echo
-        echo "Certificate for client $CLIENT revoked!"
-    else
-        echo
-        echo "Certificate revocation for client $CLIENT aborted!"
-    fi
+    echo "Certificate for client $CLIENT revoked!"
 
     log "User revoked"
     exit 0
