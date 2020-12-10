@@ -3,7 +3,7 @@
 # Copyright (c) 2013 Nyr. Released under the MIT License.
 # Copyright (c) 2019 Fabrice Triboix
 
-set -eu
+set -eu -o pipefail
 
 
 ###################
@@ -15,7 +15,8 @@ OPERATION=none
 PROTOCOL=udp
 PORT=1194
 IP=$(ip addr | grep 'inet' | grep -v inet6 | grep -vE '127\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' | grep -oE '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' | head -1)
-PUBLICIP=$(curl -s ifconfig.co)
+# NB: Try different services to get the public IP address, because some may be down
+PUBLICIP=$(curl -sf -m 10 ifconfig.co || curl -sf -m 10 ifconfig.me)
 DNS=google
 FIREWALL=no
 CLIENT=
