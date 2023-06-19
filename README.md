@@ -10,6 +10,6 @@ in batch (please note adding users still requires some interactions).
 Don't forget to enable NAT! Example on a Linux box:
 
     $ sudo iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
-    $ sudo apt install iptables-save iptables-persistent
+    $ sudo apt install iptables-persistent
     $ sudo iptables-save > /etc/iptables/rules.v4
 

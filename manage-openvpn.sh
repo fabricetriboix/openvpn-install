@@ -287,12 +287,11 @@ if [[ $OPERATION == install ]]; then
     fi
 
     # Get easy-rsa
-    EASYRSAURL='https://github.com/OpenVPN/easy-rsa/releases/download/v3.0.6/EasyRSA-unix-v3.0.6.tgz'
+    EASYRSAURL='https://github.com/OpenVPN/easy-rsa/releases/download/v3.1.4/EasyRSA-3.1.4.tgz'
     wget -O ~/easyrsa.tgz "$EASYRSAURL" 2>/dev/null \
         || curl -Lo ~/easyrsa.tgz "$EASYRSAURL"
     tar xzf ~/easyrsa.tgz -C ~/
-    mv ~/EasyRSA-v3.0.6/ /etc/openvpn/
-    mv /etc/openvpn/EasyRSA-v3.0.6/ /etc/openvpn/easy-rsa/
+    mv ~/EasyRSA-3.1.4/ /etc/openvpn/easy-rsa
     chown -R root:root /etc/openvpn/easy-rsa/
     rm -f ~/easyrsa.tgz
     cd /etc/openvpn/easy-rsa/
@@ -300,7 +299,7 @@ if [[ $OPERATION == install ]]; then
     # Create the PKI, set up the CA and the server and client certificates
     ./easyrsa init-pki
     ./easyrsa --batch build-ca nopass
-    EASYRSA_CERT_EXPIRE=3650 ./easyrsa build-server-full server nopass
+    EASYRSA_CERT_EXPIRE=3650 ./easyrsa --batch build-server-full server nopass
     EASYRSA_CRL_DAYS=3650 ./easyrsa gen-crl
 
     # Move the stuff we need
