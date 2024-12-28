@@ -20,8 +20,9 @@ PUBLICIP=$(curl -sf -m 3 ifconfig.co || curl -sf -m 3 ifconfig.me)
 DNS=google
 FIREWALL=no
 CLIENT=
+NOPASS=no
 
-ARGS=$(getopt -o hiuRa:r:tp:I:P:d:f -- "$@")
+ARGS=$(getopt -o hiuRa:r:tp:I:P:d:fn -- "$@")
 eval set -- "$ARGS"
 set +u  # Avoid unbound $1 at the end of the parsing
 while true; do
@@ -38,6 +39,7 @@ while true; do
         -P) PUBLICIP="$2"; shift; shift;;
         -d) DNS="$2"; shift; shift;;
         -f) FIREWALL=yes; shift;;
+        -n) NOPASS=yes; shift;;
         --) shift; break;;
         *) break;;
     esac
@@ -73,13 +75,17 @@ if [[ $HELP == yes ]]; then
     echo "             (default: $PUBLICIP)"
     echo "  -d CHOICE  DNS servers to use (default: $DNS)"
     echo "             allowed choices: current (use the current system"
-    echo "             resolvers), cloudflare, google, opendns, verisign"
+    echo "             resolvers), cloudflare, google, opendns, verisign,"
+    echo "             special (quad9 backed by cloudflare)."
     echo "  -f         Configure the firewall (default: don't touch the firewall)"
+    echo
+    echo "The following arguments are only available in conjuction with -a:"
+    echo "  -n         Do not set a password for the private key"
     exit 1
 fi
 
 case "$DNS" in
-    current|cloudflare|google|opendns|verisign) ;;
+    current|cloudflare|google|opendns|verisign|special) ;;
     *) echo "ERROR: Invalid DNS selection: $DNS"; exit 1;;
 esac
 
@@ -374,6 +380,10 @@ ifconfig-pool-persist ipp.txt" > /etc/openvpn/server.conf
             echo 'push "dhcp-option DNS 64.6.64.6"' >> /etc/openvpn/server.conf
             echo 'push "dhcp-option DNS 64.6.65.6"' >> /etc/openvpn/server.conf
             ;;
+
+	special)
+            echo 'push "dhcp-option DNS 9.9.9.9"' >> /etc/openvpn/server.conf
+            echo 'push "dhcp-option DNS 1.1.1.1"' >> /etc/openvpn/server.conf
     esac
 
     echo "keepalive 10 120
@@ -545,7 +555,11 @@ fi
 
 if [[ $OPERATION == adduser ]]; then
     cd /etc/openvpn/easy-rsa/
-    EASYRSA_CERT_EXPIRE=3650 ./easyrsa build-client-full "$CLIENT"
+    if [ "$NOPASS" == yes ]; then
+        EASYRSA_CERT_EXPIRE=3650 ./easyrsa --batch build-client-full "$CLIENT" nopass
+    else
+        EASYRSA_CERT_EXPIRE=3650 ./easyrsa --batch build-client-full "$CLIENT"
+    fi
     newclient "$CLIENT"
     echo "User $CLIENT added"
     echo "Configuration is available at: /etc/openvpn/$CLIENT.ovpn"
