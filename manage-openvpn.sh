@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Copyright (c) 2013 Nyr. Released under the MIT License.
-# Copyright (c) 2019 Fabrice Triboix
+# Copyright (c) 2019, 2020, 2023, 2024 Fabrice Triboix
 
 set -eu -o pipefail
 
@@ -13,16 +13,17 @@ set -eu -o pipefail
 HELP=no
 OPERATION=none
 PROTOCOL=udp
-PORT=1194
-IP=$(ip addr | grep 'inet' | grep -v inet6 | grep -vE '127\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' | grep -oE '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' | head -1)
+STUNNELPORT=443
+OPENVPNPORT=1194
+GWDEV=$(ip route list default | sed -e 's/^.*dev \([a-z0-9]*\) .*$/\1/')
 # NB: Try different services to get the public IP address, because some may be down
-PUBLICIP=$(curl -sf -m 3 ifconfig.co || curl -sf -m 3 ifconfig.me)
-DNS=google
-FIREWALL=no
+PUBLICIP=$(curl -sf -m 3 ifconfig.co || curl -sf -m 3 ifconfig.me || curl -sf -m 3 whatismyip.cc | grep 'Your IP' | awk '{ print $3 }')
+DNS=cloudflare
+STUNNEL=no
 CLIENT=
 NOPASS=no
 
-ARGS=$(getopt -o hiuRa:r:tp:I:P:d:fn -- "$@")
+ARGS=$(getopt -o hiuRa:r:tp:P:d:sS:n -- "$@")
 eval set -- "$ARGS"
 set +u  # Avoid unbound $1 at the end of the parsing
 while true; do
@@ -34,11 +35,11 @@ while true; do
         -a) OPERATION=adduser; CLIENT="$2"; shift; shift;;
         -r) OPERATION=rmuser; CLIENT="$2"; shift; shift;;
         -t) PROTOCOL=tcp; shift;;
-        -p) PORT="$2"; shift; shift;;
-        -I) IP="$2"; shift; shift;;
+        -p) OPENVPNPORT="$2"; shift; shift;;
         -P) PUBLICIP="$2"; shift; shift;;
         -d) DNS="$2"; shift; shift;;
-        -f) FIREWALL=yes; shift;;
+        -s) STUNNEL=yes; PROTOCOL=tcp; shift;;
+        -S) STUNNELPORT="$2"; shift; shift;;
         -n) NOPASS=yes; shift;;
         --) shift; break;;
         *) break;;
@@ -56,28 +57,28 @@ if [[ $HELP == yes ]]; then
     echo
     echo "You must specify one of -i, -u, -R, -a or -r argument. For all the"
     echo "other arguments, it is advised you leave them at their default"
-    echo "values, unless you really know what you are doing."
+    echo "values, unless you know what you are doing."
     echo
     echo "The available arguments are:"
     echo "  -h       Print this help message"
     echo "  -i       Install and configure an OpenVPN server"
     echo "  -u       Uninstall OpenVPN"
     echo "  -R       Refresh OpenVPN (re-install the OS packages, but leave"
-    echo "           the existing OpenVPN data untouched"
+    echo "           the existing OpenVPN data untouched)"
     echo "  -a USER  Add a user"
     echo "  -r       Remove a user"
     echo
     echo "The following arguments are only available in conjuction with -i:"
     echo "  -t         Use TCP instead of UDP"
-    echo "  -p PORT    Port number to use (default: $PORT)"
-    echo "  -I IP      Local IP address to bind to (default: $IP)"
+    echo "  -p PORT    OpenVPN port (default: $OPENVPNPORT)"
     echo "  -P IP      Public IP address (i.e. NAT address, if applicable)"
     echo "             (default: $PUBLICIP)"
     echo "  -d CHOICE  DNS servers to use (default: $DNS)"
     echo "             allowed choices: current (use the current system"
     echo "             resolvers), cloudflare, google, opendns, verisign,"
     echo "             special (quad9 backed by cloudflare)."
-    echo "  -f         Configure the firewall (default: don't touch the firewall)"
+    echo "  -s         Configure stunnel to pass VPN traffic into an SSL tunnel (implies -t)"
+    echo "  -S PORT    Stunnel port (default: $STUNNELPORT); ignored unless -s is set"
     echo
     echo "The following arguments are only available in conjuction with -a:"
     echo "  -n         Do not set a password for the private key"
@@ -99,6 +100,12 @@ if [[ $OPERATION == adduser ]]; then
         echo "ERROR: User name is empty"
         exit 1
     fi
+fi
+
+if [[ $STUNNEL == yes ]]; then
+    EXTERNALPORT="$STUNNELPORT"
+else
+    EXTERNALPORT="$OPENVPNPORT"
 fi
 
 log() {
@@ -130,17 +137,14 @@ fi
 if [[ -e /etc/debian_version ]]; then
     OS=debian
     GROUPNAME=nogroup
-    RCLOCAL='/etc/rc.local'
     export DEBIAN_FRONTEND=noninteractive
 
 elif [[ -e /etc/centos-release || -e /etc/redhat-release || -e /etc/system-release ]]; then
     OS=centos
     GROUPNAME=nobody
-    RCLOCAL='/etc/rc.d/rc.local'
 
 else
-    echo "ERROR: Looks like you aren't running this installer on Debian,"
-    echo "Ubuntu, RedHat, CentOS or Amazon Linux"
+    echo "ERROR: Only Debian-based and RedHat-based OSs are supported"
     exit 1
 fi
 
@@ -176,19 +180,19 @@ newclient () {
 ###################
 
 if [[ $OPERATION == refresh ]]; then
+    if [[ "$STUNNEL" == yes ]]; then
+        extrapkg=stunnel4
+    else
+        extrapkg=
+    fi
+
     if [[ $OS == debian ]]; then
         apt-get -q -y update
-        apt-get -q -y install openvpn openssl ca-certificates
-        if [[ $FIREWALL == yes ]]; then
-            apt-get -q -y iptables
-        fi
+        apt-get -q -y install openvpn openssl ca-certificates $extrapkg
 
     else
         yum -q -y install epel-release
-        yum -q -y install openvpn openssl ca-certificates
-        if [[ $FIREWALL == yes ]]; then
-            yum -q -y install iptables
-        fi
+        yum -q -y install openvpn openssl ca-certificates $extrapkg
     fi
 
     # Enable net.ipv4.ip_forward for the system
@@ -197,76 +201,41 @@ if [[ $OPERATION == refresh ]]; then
     # Enable without waiting for a reboot or service restart
     echo 1 > /proc/sys/net/ipv4/ip_forward
 
-    if [[ $FIREWALL == yes ]]; then
-        if pgrep firewalld; then
-            # Using both permanent and not permanent rules to avoid a firewalld
-            # reload.
-            # We don't use --add-service=openvpn because that would only work with
-            # the default port and protocol.
-            firewall-cmd --zone=public --add-port=$PORT/$PROTOCOL
-            firewall-cmd --zone=trusted --add-source=10.8.0.0/24
-            firewall-cmd --permanent --zone=public --add-port=$PORT/$PROTOCOL
-            firewall-cmd --permanent --zone=trusted --add-source=10.8.0.0/24
-            # Set NAT for the VPN subnet
-            firewall-cmd --direct --add-rule ipv4 nat POSTROUTING 0 -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j SNAT --to $IP
-            firewall-cmd --permanent --direct --add-rule ipv4 nat POSTROUTING 0 -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j SNAT --to $IP
-
-        else
-            # Needed to use rc.local with some systemd distros
-            if [[ "$OS" = 'debian' && ! -e $RCLOCAL ]]; then
-                echo '#!/bin/sh -e
-    exit 0' > $RCLOCAL
-            fi
-            chmod +x $RCLOCAL
-
-            # Set NAT for the VPN subnet
-            iptables -t nat -A POSTROUTING -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j SNAT --to $IP
-            sed -i "1 a\iptables -t nat -A POSTROUTING -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j SNAT --to $IP" $RCLOCAL
-
-            if iptables -L -n | grep -qE '^(REJECT|DROP)'; then
-                # If iptables has at least one REJECT rule, we asume this is
-                # needed. Not the best approach but I can't think of other
-                # and this shouldn't cause problems.
-                iptables -I INPUT -p $PROTOCOL --dport $PORT -j ACCEPT
-                iptables -I FORWARD -s 10.8.0.0/24 -j ACCEPT
-                iptables -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
-                sed -i "1 a\iptables -I INPUT -p $PROTOCOL --dport $PORT -j ACCEPT" $RCLOCAL
-                sed -i "1 a\iptables -I FORWARD -s 10.8.0.0/24 -j ACCEPT" $RCLOCAL
-                sed -i "1 a\iptables -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT" $RCLOCAL
-            fi
-        fi
-    else
-        log "Not touching the firewall"
-    fi
-    echo $FIREWALL > /etc/openvpn/configure-firewall
-
     # If SELinux is enabled and a custom port was selected, we need this
-    if sestatus 2>/dev/null | grep "Current mode" | grep -q "enforcing" && [[ "$PORT" != '1194' ]]; then
+    if sestatus 2>/dev/null | grep "Current mode" | grep -q "enforcing" && [[ "$OPENVPNPORT" != '1194' ]]; then
         # Install semanage if not already present
         if ! hash semanage 2>/dev/null; then
             yum install policycoreutils-python -y
         fi
-        semanage port -a -t openvpn_port_t -p $PROTOCOL $PORT
+        semanage port -a -t openvpn_port_t -p $PROTOCOL $OPENVPNPORT
     fi
 
-    # And finally, restart OpenVPN
-    if [[ "$OS" = 'debian' ]]; then
-        # Little hack to check for systemd
-        if pgrep systemd-journal; then
-            systemctl restart openvpn@server.service
-        else
-            /etc/init.d/openvpn restart
+    # And finally, restart OpenVPN and stunnel
+    #   Little hack to check for systemd
+    if pgrep systemd-journal; then
+        if [[ "$STUNNEL" == yes ]]; then
+            systemctl stop stunnel4
+            killall stunnel4 || true  # `systemctl stop stunnel4` doesn't work very well...
+            systemctl start stunnel4
         fi
+        systemctl restart openvpn@server.service
     else
-        if pgrep systemd-journal; then
-            systemctl restart openvpn@server.service
-            systemctl enable openvpn@server.service
+        if [[ "$OS" = 'debian' ]]; then
+            if [[ "$STUNNEL" == yes ]]; then
+                /etc/init.d/stunnel4 restart
+            fi
+            /etc/init.d/openvpn restart
         else
+            if [[ "$STUNNEL" == yes ]]; then
+                service stunnel4 restart
+                chkconfig stunnel4 on
+            fi
             service openvpn restart
             chkconfig openvpn on
         fi
     fi
 
+    echo "$STUNNEL" > /etc/openvpn/is-stunnel-enabled
     log "OpenVPN successfully refreshed"
     exit 0
 fi
@@ -277,19 +246,19 @@ fi
 #################################
 
 if [[ $OPERATION == install ]]; then
+    if [[ "$STUNNEL" == yes ]]; then
+        extrapkg=stunnel4
+    else
+        extrapkg=
+    fi
+
     if [[ $OS == debian ]]; then
         apt-get -q -y update
-        apt-get -q -y install openvpn openssl ca-certificates
-        if [[ $FIREWALL == yes ]]; then
-            apt-get -q -y iptables
-        fi
+        apt-get -q -y install openvpn openssl ca-certificates $extrapkg
 
     else
         yum -q -y install epel-release
-        yum -q -y install openvpn openssl ca-certificates
-        if [[ $FIREWALL == yes ]]; then
-            yum -q -y install iptables
-        fi
+        yum -q -y install openvpn openssl ca-certificates $extrapkg
     fi
 
     # Get easy-rsa
@@ -329,7 +298,7 @@ ssbzSibBsu/6iGtCOGEoXJf//////////wIBAg==
 -----END DH PARAMETERS-----' > /etc/openvpn/dh.pem
 
     # Generate server.conf
-    echo "port $PORT
+    echo "port $OPENVPNPORT
 proto $PROTOCOL
 dev tun
 sndbuf 0
@@ -402,83 +371,65 @@ crl-verify crl.pem" >> /etc/openvpn/server.conf
     # Enable without waiting for a reboot or service restart
     echo 1 > /proc/sys/net/ipv4/ip_forward
 
-    if [[ $FIREWALL == yes ]]; then
-        if pgrep firewalld; then
-            # Using both permanent and not permanent rules to avoid a firewalld
-            # reload.
-            # We don't use --add-service=openvpn because that would only work with
-            # the default port and protocol.
-            firewall-cmd --zone=public --add-port=$PORT/$PROTOCOL
-            firewall-cmd --zone=trusted --add-source=10.8.0.0/24
-            firewall-cmd --permanent --zone=public --add-port=$PORT/$PROTOCOL
-            firewall-cmd --permanent --zone=trusted --add-source=10.8.0.0/24
-            # Set NAT for the VPN subnet
-            firewall-cmd --direct --add-rule ipv4 nat POSTROUTING 0 -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j SNAT --to $IP
-            firewall-cmd --permanent --direct --add-rule ipv4 nat POSTROUTING 0 -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j SNAT --to $IP
-
-        else
-            # Needed to use rc.local with some systemd distros
-            if [[ "$OS" = 'debian' && ! -e $RCLOCAL ]]; then
-                echo '#!/bin/sh -e
-    exit 0' > $RCLOCAL
-            fi
-            chmod +x $RCLOCAL
-
-            # Set NAT for the VPN subnet
-            iptables -t nat -A POSTROUTING -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j SNAT --to $IP
-            sed -i "1 a\iptables -t nat -A POSTROUTING -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j SNAT --to $IP" $RCLOCAL
-
-            if iptables -L -n | grep -qE '^(REJECT|DROP)'; then
-                # If iptables has at least one REJECT rule, we asume this is
-                # needed. Not the best approach but I can't think of other
-                # and this shouldn't cause problems.
-                iptables -I INPUT -p $PROTOCOL --dport $PORT -j ACCEPT
-                iptables -I FORWARD -s 10.8.0.0/24 -j ACCEPT
-                iptables -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
-                sed -i "1 a\iptables -I INPUT -p $PROTOCOL --dport $PORT -j ACCEPT" $RCLOCAL
-                sed -i "1 a\iptables -I FORWARD -s 10.8.0.0/24 -j ACCEPT" $RCLOCAL
-                sed -i "1 a\iptables -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT" $RCLOCAL
-            fi
-        fi
-    else
-        log "Not touching the firewall"
-    fi
-    echo $FIREWALL > /etc/openvpn/configure-firewall
-
     # If SELinux is enabled and a custom port was selected, we need this
-    if sestatus 2>/dev/null | grep "Current mode" | grep -q "enforcing" && [[ "$PORT" != '1194' ]]; then
+    if sestatus 2>/dev/null | grep "Current mode" | grep -q "enforcing" && [[ "$OPENVPNPORT" != '1194' ]]; then
         # Install semanage if not already present
         if ! hash semanage 2>/dev/null; then
             yum install policycoreutils-python -y
         fi
-        semanage port -a -t openvpn_port_t -p $PROTOCOL $PORT
+        semanage port -a -t openvpn_port_t -p $PROTOCOL $OPENVPNPORT
     fi
 
-    # And finally, restart OpenVPN
-    if [[ "$OS" = 'debian' ]]; then
-        # Little hack to check for systemd
-        if pgrep systemd-journal; then
-            systemctl restart openvpn@server.service
-        else
-            /etc/init.d/openvpn restart
+    # Configure stunnel
+    if [[ "$STUNNEL" == yes ]]; then
+        openssl req -new -newkey rsa:4096 -days 3650 -nodes -x509 -sha256 -subj '/CN=127.0.0.1/O=localhost/C=US' -keyout /etc/stunnel/stunnel.pem -out /etc/stunnel/stunnel.pem
+
+        STUNNELCONF=/etc/stunnel/stunnel.conf
+        echo "[openvpn]" > "$STUNNELCONF"
+        echo "client = no" >> "$STUNNELCONF"
+        echo "accept = $STUNNELPORT" >> "$STUNNELCONF"
+        echo "cert = /etc/stunnel/stunnel.pem" >> "$STUNNELCONF"
+        echo "connect = 127.0.0.1:$OPENVPNPORT" >> "$STUNNELCONF"
+    fi
+
+    # And finally, restart OpenVPN and stunnel
+    #   Little hack to check for systemd
+    if pgrep systemd-journal; then
+        if [[ "$STUNNEL" == yes ]]; then
+            systemctl stop stunnel4
+            killall stunnel4 || true  # `systemctl stop stunnel4` doesn't work very well...
+            systemctl start stunnel4
         fi
+        systemctl restart openvpn@server.service
     else
-        if pgrep systemd-journal; then
-            systemctl restart openvpn@server.service
-            systemctl enable openvpn@server.service
+        if [[ "$OS" = 'debian' ]]; then
+            if [[ "$STUNNEL" == yes ]]; then
+                /etc/init.d/stunnel4 restart
+            fi
+            /etc/init.d/openvpn restart
         else
+            if [[ "$STUNNEL" == yes ]]; then
+                service stunnel4 restart
+                chkconfig stunnel4 on
+            fi
             service openvpn restart
             chkconfig openvpn on
         fi
     fi
 
     # client-common.txt is created so we have a template to add further users later
+    if [[ "$STUNNEL" == yes ]]; then
+        # When using stunnel, the client will connect to its local stunnel
+        CNXIP=127.0.0.1
+    else
+        CNXIP="$PUBLICIP"
+    fi
     echo "client
 dev tun
 proto $PROTOCOL
 sndbuf 0
 rcvbuf 0
-remote $PUBLICIP $PORT
+remote $CNXIP $OPENVPNPORT
 resolv-retry infinite
 nobind
 persist-key
@@ -490,7 +441,27 @@ setenv opt block-outside-dns
 key-direction 1
 verb 3" > /etc/openvpn/client-common.txt
 
+    echo "$STUNNEL" > /etc/openvpn/is-stunnel-enabled
     log "OpenVPN successfully installed and configured"
+
+    if [[ "$STUNNEL" == yes ]]; then
+        echo "You now need to install and configure stunnel on your clients."
+        echo
+        echo "To install, run the following on your client (or equivalent for your OS):"
+        echo
+        echo "sudo apt install stunnel4"
+        echo
+        echo "To configure stunnel, write the following into /etc/stunnel/stunnel.conf in your client OS:"
+        echo
+        echo "[openvpn]"
+        echo "client = yes"
+        echo "accept = 127.0.0.1:1194"
+        echo "connect = $PUBLICIP:$STUNNELPORT"
+        echo "cert = /etc/stunnel/stunnel.pem"
+        echo
+        echo "You will also need to copy /etc/stunnel/stunnel.pem from this server to your client OS and place it at /etc/stunnel/stunnel.pem"
+    fi
+
     exit 0
 fi
 
@@ -502,47 +473,32 @@ fi
 if [[ $OPERATION == uninstall ]]; then
     PORT=$(grep '^port ' /etc/openvpn/server.conf | cut -d " " -f 2)
     PROTOCOL=$(grep '^proto ' /etc/openvpn/server.conf | cut -d " " -f 2)
-    FIREWALL=no
-    if [[ -r /etc/openvpn/configure-firewall ]]; then
-        FIREWALL=$(cat /etc/openvpn/configure-firewall)
-    fi
-    if [[ $FIREWALL == yes ]]; then
-        if pgrep firewalld; then
-            IP=$(firewall-cmd --direct --get-rules ipv4 nat POSTROUTING | grep '\-s 10.8.0.0/24 '"'"'!'"'"' -d 10.8.0.0/24 -j SNAT --to ' | cut -d " " -f 10)
-            # Using both permanent and not permanent rules to avoid a firewalld reload.
-            firewall-cmd --zone=public --remove-port=$PORT/$PROTOCOL
-            firewall-cmd --zone=trusted --remove-source=10.8.0.0/24
-            firewall-cmd --permanent --zone=public --remove-port=$PORT/$PROTOCOL
-            firewall-cmd --permanent --zone=trusted --remove-source=10.8.0.0/24
-            firewall-cmd --direct --remove-rule ipv4 nat POSTROUTING 0 -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j SNAT --to $IP
-            firewall-cmd --permanent --direct --remove-rule ipv4 nat POSTROUTING 0 -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j SNAT --to $IP
-        else
-            IP=$(grep 'iptables -t nat -A POSTROUTING -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j SNAT --to ' $RCLOCAL | cut -d " " -f 14)
-            iptables -t nat -D POSTROUTING -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j SNAT --to $IP
-            sed -i '/iptables -t nat -A POSTROUTING -s 10.8.0.0\/24 ! -d 10.8.0.0\/24 -j SNAT --to /d' $RCLOCAL
-            if iptables -L -n | grep -qE '^ACCEPT'; then
-                iptables -D INPUT -p $PROTOCOL --dport $PORT -j ACCEPT
-                iptables -D FORWARD -s 10.8.0.0/24 -j ACCEPT
-                iptables -D FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
-                sed -i "/iptables -I INPUT -p $PROTOCOL --dport $PORT -j ACCEPT/d" $RCLOCAL
-                sed -i "/iptables -I FORWARD -s 10.8.0.0\/24 -j ACCEPT/d" $RCLOCAL
-                sed -i "/iptables -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT/d" $RCLOCAL
-            fi
-        fi
+
+    STUNNEL=no
+    if [ -e /etc/openvpn/is-stunnel-enabled ]; then
+        STUNNEL=$(cat /etc/openvpn/is-stunnel-enabled)
     fi
 
     if sestatus 2>/dev/null | grep "Current mode" | grep -q "enforcing" && [[ "$PORT" != '1194' ]]; then
         semanage port -d -t openvpn_port_t -p $PROTOCOL $PORT
     fi
 
+    if [[ "$STUNNEL" == yes ]]; then
+        extrapkg=stunnel4
+    fi
+
     if [[ "$OS" = 'debian' ]]; then
-        apt-get -q -y remove --purge openvpn
+        apt-get -q -y remove --purge openvpn $extrapkg
     else
-        yum -q -y remove openvpn
+        yum -q -y remove openvpn $extrapkg
     fi
 
     rm -rf /etc/openvpn
     rm -f /etc/sysctl.d/30-openvpn-forward.conf
+
+    if [[ "$STUNNEL" == yes ]]; then
+        rm -rf /etc/stunnel
+    fi
 
     log "OpenVPN uninstalled"
     exit 0
