@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Copyright (c) 2013 Nyr. Released under the MIT License.
-# Copyright (c) 2019, 2020, 2023, 2024 Fabrice Triboix
+# Copyright (c) 2019, 2020, 2023, 2024, 2025 Fabrice Triboix
 
 set -eu -o pipefail
 
@@ -15,7 +15,6 @@ OPERATION=none
 PROTOCOL=udp
 STUNNELPORT=443
 OPENVPNPORT=1194
-GWDEV=$(ip route list default | sed -e 's/^.*dev \([a-z0-9]*\) .*$/\1/')
 # NB: Try different services to get the public IP address, because some may be down
 PUBLICIP=$(curl -sf -m 3 ifconfig.co || curl -sf -m 3 ifconfig.me || curl -sf -m 3 whatismyip.cc | grep 'Your IP' | awk '{ print $3 }')
 DNS=cloudflare
@@ -51,20 +50,17 @@ if [[ $HELP == yes ]]; then
     echo "Install, configure and manage an OpenVPN server and its users"
     echo
     echo "This script automatically detects whether the OS is Debian-based"
-    echo "or RedHat-based and acts accordingly."
+    echo "or RedHat-based and acts accordingly. Other OSs are not supported."
     echo
-    echo "Please note this script must be run as root."
-    echo
-    echo "You must specify one of -i, -u, -R, -a or -r argument. For all the"
-    echo "other arguments, it is advised you leave them at their default"
-    echo "values, unless you know what you are doing."
+    echo "Please note this script must be run as root. It does not touch"
+    echo "the firewall or the routes, we have to do this yourself."
     echo
     echo "The available arguments are:"
     echo "  -h       Print this help message"
     echo "  -i       Install and configure an OpenVPN server"
     echo "  -u       Uninstall OpenVPN"
     echo "  -R       Refresh OpenVPN (re-install the OS packages, but leave"
-    echo "           the existing OpenVPN data untouched)"
+    echo "           the existing data untouched)"
     echo "  -a USER  Add a user"
     echo "  -r       Remove a user"
     echo
@@ -77,8 +73,10 @@ if [[ $HELP == yes ]]; then
     echo "             allowed choices: current (use the current system"
     echo "             resolvers), cloudflare, google, opendns, verisign,"
     echo "             special (quad9 backed by cloudflare)."
-    echo "  -s         Configure stunnel to pass VPN traffic into an SSL tunnel (implies -t)"
-    echo "  -S PORT    Stunnel port (default: $STUNNELPORT); ignored unless -s is set"
+    echo "  -s         Configure stunnel to pass VPN traffic into an SSL"
+    echo "             tunnel (implies -t)"
+    echo "  -S PORT    Stunnel port (default: $STUNNELPORT); ignored unless"
+    echo "             -s is set"
     echo
     echo "The following arguments are only available in conjuction with -a:"
     echo "  -n         Do not set a password for the private key"
@@ -180,10 +178,9 @@ newclient () {
 ###################
 
 if [[ $OPERATION == refresh ]]; then
+    extrapkg=
     if [[ "$STUNNEL" == yes ]]; then
         extrapkg=stunnel4
-    else
-        extrapkg=
     fi
 
     if [[ $OS == debian ]]; then
@@ -214,8 +211,9 @@ if [[ $OPERATION == refresh ]]; then
     #   Little hack to check for systemd
     if pgrep systemd-journal; then
         if [[ "$STUNNEL" == yes ]]; then
+            # TODO: I can't manage stunnel using `systemctl stop stunnel@stunnel`...
             systemctl stop stunnel4
-            killall stunnel4 || true  # `systemctl stop stunnel4` doesn't work very well...
+            killall stunnel4 || true
             systemctl start stunnel4
         fi
         systemctl restart openvpn@server.service
@@ -246,10 +244,9 @@ fi
 #################################
 
 if [[ $OPERATION == install ]]; then
+    extrapkg=
     if [[ "$STUNNEL" == yes ]]; then
         extrapkg=stunnel4
-    else
-        extrapkg=
     fi
 
     if [[ $OS == debian ]]; then
@@ -313,6 +310,10 @@ topology subnet
 server 10.8.0.0 255.255.255.0
 ifconfig-pool-persist ipp.txt" > /etc/openvpn/server.conf
     echo 'push "redirect-gateway def1 bypass-dhcp"' >> /etc/openvpn/server.conf
+
+    if [[ "$STUNNEL" == yes ]]; then
+        echo "local 127.0.0.1" >> /etc/openvpn/server.conf
+    fi
 
     # DNS
     case $DNS in
@@ -396,8 +397,9 @@ crl-verify crl.pem" >> /etc/openvpn/server.conf
     #   Little hack to check for systemd
     if pgrep systemd-journal; then
         if [[ "$STUNNEL" == yes ]]; then
+            # TODO: I can't manage stunnel using `systemctl stop stunnel@stunnel`...
             systemctl stop stunnel4
-            killall stunnel4 || true  # `systemctl stop stunnel4` doesn't work very well...
+            killall stunnel4 || true
             systemctl start stunnel4
         fi
         systemctl restart openvpn@server.service
@@ -447,11 +449,13 @@ verb 3" > /etc/openvpn/client-common.txt
     if [[ "$STUNNEL" == yes ]]; then
         echo "You now need to install and configure stunnel on your clients."
         echo
-        echo "To install, run the following on your client (or equivalent for your OS):"
+        echo "To install, run the following on your client (or equivalent"
+        echo "for your OS):"
         echo
         echo "sudo apt install stunnel4"
         echo
-        echo "To configure stunnel, write the following into /etc/stunnel/stunnel.conf in your client OS:"
+        echo "To configure stunnel, write the following into"
+        echo "/etc/stunnel/stunnel.conf in your client OS:"
         echo
         echo "[openvpn]"
         echo "client = yes"
@@ -459,7 +463,15 @@ verb 3" > /etc/openvpn/client-common.txt
         echo "connect = $PUBLICIP:$STUNNELPORT"
         echo "cert = /etc/stunnel/stunnel.pem"
         echo
-        echo "You will also need to copy /etc/stunnel/stunnel.pem from this server to your client OS and place it at /etc/stunnel/stunnel.pem"
+        echo "You will also need to copy /etc/stunnel/stunnel.pem from this"
+        echo "server to your client OS and place it at /etc/stunnel/stunnel.pem."
+        echo
+        echo "Finally, you will need to add a static route to $PUBLICIP in"
+        echo "order to avoid a routing loop. This would look like this,"
+        echo "assuming eth0 is your main network interface and 192.168.0.9 its"
+        echo "IP address and 192.168.0.1 your local router:"
+        echo
+        echo "sudo ip route add $PUBLICIP dev eth0 via 192.168.0.1 src 192.168.0.9"
     fi
 
     exit 0
@@ -483,6 +495,7 @@ if [[ $OPERATION == uninstall ]]; then
         semanage port -d -t openvpn_port_t -p $PROTOCOL $PORT
     fi
 
+    extrapkg=
     if [[ "$STUNNEL" == yes ]]; then
         extrapkg=stunnel4
     fi
