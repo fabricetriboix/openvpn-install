@@ -465,13 +465,6 @@ verb 3" > /etc/openvpn/client-common.txt
         echo
         echo "You will also need to copy /etc/stunnel/stunnel.pem from this"
         echo "server to your client OS and place it at /etc/stunnel/stunnel.pem."
-        echo
-        echo "Finally, you will need to add a static route to $PUBLICIP in"
-        echo "order to avoid a routing loop. This would look like this,"
-        echo "assuming eth0 is your main network interface and 192.168.0.9 its"
-        echo "IP address and 192.168.0.1 your local router:"
-        echo
-        echo "sudo ip route add $PUBLICIP dev eth0 via 192.168.0.1 src 192.168.0.9"
     fi
 
     exit 0
